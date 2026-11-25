@@ -2,6 +2,8 @@
 
 A small, readable **Security Information & Event Management** pipeline in Python. It collects logs from three different sources, normalizes them into one schema, runs **15 detection rules** (mapped to MITRE ATT&CK, including cross-source correlation), stores everything in SQLite, and presents alerts in a Streamlit analyst dashboard with an investigation view.
 
+It can analyse finished log files **or watch them live**, raising alerts within about a second as an attack unfolds (near-real-time, by polling).
+
 It mirrors the core loop of a real SOC: **collect -> normalize -> detect -> triage -> investigate.**
 
 ![Alert timeline](docs/alert-timeline.png)
@@ -13,7 +15,9 @@ It mirrors the core loop of a real SOC: **collect -> normalize -> detect -> tria
 - **Idempotent**: re-ingesting a file or re-running detection never creates duplicates, while genuinely repeated log lines are still preserved.
 - **Analyst dashboard**: KPIs, alert timeline, event volume by source, severity breakdown, top offending IPs, MITRE ATT&CK coverage, a searchable alert table, and an investigation panel showing the raw evidence lines and everything else that IP or user did.
 - **Demo data generator**: a day of realistic benign traffic plus six injected attack scenarios, using only RFC 5737 documentation IPs (`203.0.113.x`, `198.51.100.x`, `192.0.2.x`).
-- **53 automated tests**, including boundary tests for every rule, an end-to-end pipeline test, and a **false-positive guard** asserting a normal day of traffic raises zero alerts.
+- **Live monitoring**: `python cli.py watch` tails log files, saves new events and prints `NEW` / `UPDATED` alerts as they happen. A growing attack *updates* its alert instead of duplicating it. The dashboard has an **Auto-refresh** switch.
+- **Attack simulator**: `python cli.py simulate` writes a fake multi-stage attack line by line so you can watch it get detected.
+- **97 automated tests**, including boundary tests for every rule, an end-to-end pipeline test, a **false-positive guard** asserting a normal day of traffic raises zero alerts, and tests for the live watcher, simulator and dashboard.
 
 ## Architecture
 
@@ -28,6 +32,7 @@ flowchart LR
     K --> AL[(SQLite<br/>alerts)]
     AL --> D[Streamlit dashboard]
     S --> D
+    T[Live tailer<br/>watch] -.-> P
     CLI[cli.py] -.-> P
     CLI -.-> R
 ```
@@ -38,9 +43,12 @@ flowchart LR
 | `siem/parsers.py` | One parser per log format; returns `None` for lines it does not understand |
 | `siem/storage.py` | SQLite persistence with de-duplication |
 | `siem/rules.py` | All detection and correlation rules plus thresholds (`DEFAULT_CONFIG`) |
-| `siem/engine.py` | `ingest_file()` and `detect()`: the glue |
+| `siem/engine.py` | `ingest_file()`, `ingest_lines()`, `detect()` and `detect_recent()`: the glue |
+| `siem/tail.py` | Live file tailer: byte-offset bookmark, partial lines, truncation/rotation |
+| `siem/live.py` | `LiveMonitor`: one round = read new lines, save, detect, report changes |
+| `siem/simulator.py` | Writes a fake attack slowly into log files (demo and tests) |
 | `siem/sample_data.py` | Synthetic log generator with attack scenarios |
-| `cli.py` | Command-line interface |
+| `cli.py` | Command-line interface (`demo`, `ingest`, `detect`, `alerts`, `rules`, `watch`, `simulate`) |
 | `dashboard.py` | Streamlit dashboard |
 
 ## Quick start
@@ -67,6 +75,37 @@ python cli.py alerts --min-severity high
 ```
 
 You can also upload files from the dashboard sidebar. Only analyze logs from systems you own or are authorized to monitor.
+
+## Live monitoring (near-real-time)
+
+Besides analysing a finished log file, Mini-SIEM can **watch log files while they grow** and raise alerts within about a second of the evidence appearing.
+
+```
+# window 1: watch the files (new lines only)
+python cli.py watch --auth live-logs/auth.log --web live-logs/access.log
+
+# window 2: write a FAKE multi-stage attack, one log line per second
+python cli.py simulate
+
+# window 3: dashboard, then switch on "Auto-refresh" in the sidebar
+streamlit run dashboard.py
+```
+
+Windows 1 prints `NEW` and `UPDATED` alerts as the attack unfolds: SQL injection probing, then SSH brute force, then a successful login, then sudo abuse, then a correlated critical alert. The brute-force alert is *updated* (its event count grows) rather than duplicated.
+
+### How it works
+- **Tailer** (`siem/tail.py`): remembers a byte offset per file (a bookmark) and polls once a second. It waits for incomplete lines, and starts over if a file is truncated or rotated.
+- **Safe ingestion** (`siem/engine.py`): each event gets an ID built from its file position, so reading the same line twice never creates a duplicate.
+- **Updating alerts** (`Storage.upsert_alerts`): an alert has a stable key, so a growing attack updates one alert instead of freezing at the first few events.
+- **Recent-window detection** (`detect_recent`): after new events arrive, the rules re-run over the last 24 hours only (configurable with `--lookback-hours`).
+- **Shared database**: SQLite in WAL mode lets the watcher write while the dashboard reads.
+
+### Limitations
+- It *polls* once a second; it is near-real-time, not a streaming platform (no Kafka, no push).
+- It watches log files on one machine; there is no agent that ships logs from other hosts.
+- An attack longer than the lookback window can lose its beginning from the window.
+- Log files must be UTF-8/ASCII text (UTF-16 files, such as PowerShell `>>` output, are not read).
+- The simulator is fake data built from reserved documentation IP ranges.
 
 ## Detection rules
 
@@ -121,7 +160,7 @@ Write `parse_xxx_line(line) -> Optional[Event]` in `siem/parsers.py`, add it to 
 
 Being honest about these is part of the project:
 
-- **Batch, not streaming.** Detection re-reads stored events each run. A production system would tail logs and evaluate rules incrementally.
+- **Polling, not true streaming.** Live mode checks files once a second and re-runs the rules over a recent window. A production system would ship logs from many hosts through a queue (for example Kafka) and evaluate rules incrementally.
 - **SQLite is fine for demos, not for volume.** The `Storage` class is the seam for swapping in Elasticsearch/OpenSearch or Postgres.
 - **Regex rules can be evaded.** Attackers obfuscate. Real deployments layer these with anomaly detection and WAF data. Thresholds were tuned against the synthetic data and would need tuning on real traffic.
 - **Syslog has no year**, so the `--year` flag exists (and rolls back a year for December lines read in January).
