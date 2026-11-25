@@ -6,8 +6,6 @@ It mirrors the core loop of a real SOC: **collect -> normalize -> detect -> tria
 
 ![Alert timeline](docs/alert-timeline.png)
 
-*(Chart renders from the demo data. Replace with a screenshot of your own running dashboard.)*
-
 ## Features
 
 - **Three log sources, one schema**: Linux `auth.log` (sshd + sudo), Apache/nginx combined access logs, JSON-lines application logs. Adding a source means writing one parser function.
@@ -55,11 +53,6 @@ python cli.py demo            # generates sample logs, ingests them, runs detect
 streamlit run dashboard.py    # open http://localhost:8501
 ```
 
-Or with Docker (builds, loads demo data, serves the dashboard):
-
-```bash
-docker build -t mini-siem . && docker run -p 8501:8501 mini-siem
-```
 
 Run the tests: `python -m pytest`
 
@@ -145,7 +138,7 @@ Use only numbers you can defend in an interview, and keep them true as you chang
 - Implemented **cross-source correlation** (web attack + credential attack from one IP; account takeover followed by `sudo` abuse) that escalates to critical multi-stage alerts.
 - Designed **idempotent ingestion and alerting** (stable event hashes, alert dedup keys) so re-running pipelines never duplicates data.
 - Wrote **53 automated tests**, including per-rule threshold-boundary tests, an end-to-end pipeline test, and a false-positive guard asserting zero alerts on benign traffic.
-- Built an analyst dashboard with an alert timeline, severity and top-IP breakdowns, and an investigation view that surfaces raw log evidence; packaged with Docker.
+- Built an analyst dashboard with an alert timeline, severity and top-IP breakdowns, and an investigation view that surfaces raw log evidence.
 
 If you extend the project, you can add measured claims, for example detection results against a public dataset such as CICIDS2017. Measure first, then write the number.
 
