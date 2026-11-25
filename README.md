@@ -130,25 +130,7 @@ Being honest about these is part of the project:
 
 Ideas for extending it: GeoIP/ASN enrichment, Sigma rule import, alert notifications (email/Slack/webhook), Elasticsearch backend, per-user behavioural baselines, an ML anomaly detector as one more rule.
 
-## Resume bullets
-
-Use only numbers you can defend in an interview, and keep them true as you change the project. These match the project as delivered:
-
-- Built a mini **SIEM** in Python (Streamlit, SQLite) that normalizes **SSH/auth, web-server and JSON application logs** into a common schema and applies **15 detection rules mapped to MITRE ATT&CK**.
-- Implemented **cross-source correlation** (web attack + credential attack from one IP; account takeover followed by `sudo` abuse) that escalates to critical multi-stage alerts.
-- Designed **idempotent ingestion and alerting** (stable event hashes, alert dedup keys) so re-running pipelines never duplicates data.
-- Wrote **53 automated tests**, including per-rule threshold-boundary tests, an end-to-end pipeline test, and a false-positive guard asserting zero alerts on benign traffic.
-- Built an analyst dashboard with an alert timeline, severity and top-IP breakdowns, and an investigation view that surfaces raw log evidence.
-
-If you extend the project, you can add measured claims, for example detection results against a public dataset such as CICIDS2017. Measure first, then write the number.
-
-## Interview talking points
-
-- *Why bursts instead of sliding windows?* Alert fatigue: one attack should be one alert.
-- *How do you avoid double-counting?* sshd logs both "Invalid user" and "Failed password" per attempt; only the latter counts as a failure. Brute force and spraying are mutually exclusive by distinct-username count.
-- *How do you know it doesn't cry wolf?* The benign-day test asserts zero alerts; every rule has just-under and just-over threshold tests.
-- *What would break at scale?* Batch detection and SQLite; the storage layer is the seam to replace.
 
 ## License
 
-No license file is included yet. Add one before publishing (MIT is a common choice for portfolio projects). The synthetic data uses reserved documentation IP ranges and contains no real hosts or credentials.
+MIT. See the `LICENSE` file. The synthetic data uses reserved documentation IP ranges and contains no real hosts or credentials.
