@@ -90,22 +90,65 @@ class Storage:
         ]
 
     # ---------------------------------------------------------------- alerts
-    def insert_alerts(self, alerts: Iterable[Alert]) -> int:
+    def upsert_alerts(self, alerts: Iterable[Alert]) -> tuple[list[Alert], list[Alert]]:
+        """Save alerts. Returns ``(new_alerts, updated_alerts)``.
+
+        * An alert we have never seen is inserted.
+        * An alert we already have (same ``dedup_key``) is *updated* if something changed,
+          for example an ongoing attack now involves more events. That is what lets a live
+          attack grow its existing alert instead of freezing at the first few events.
+        * An alert that is identical to the stored one is left alone, so re-running detection
+          over the same data changes nothing.
+        """
+        unique: dict[str, Alert] = {}
+        for a in alerts:
+            unique.setdefault(a.dedup_key, a)  # same key twice in one batch: keep the first
+        if not unique:
+            return [], []
+
+        keys = list(unique)
+        stored: dict[str, tuple] = {}
+        for i in range(0, len(keys), 500):  # SQLite limits how many ? placeholders one query may use
+            chunk = keys[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for r in self.conn.execute(
+                f"SELECT dedup_key, event_count, severity, description FROM alerts WHERE dedup_key IN ({marks})",
+                chunk,
+            ):
+                stored[r["dedup_key"]] = (r["event_count"], r["severity"], r["description"])
+
         now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-        rows = [
-            (a.dedup_key, a.rule_id, a.title, a.severity, a.timestamp.isoformat(), a.src_ip,
-             a.username, a.description, a.mitre, a.event_count, json.dumps(a.evidence), now)
-            for a in alerts
-        ]
-        before = self.conn.total_changes
+        new, updated = [], []
+        for key, a in unique.items():
+            before = stored.get(key)
+            if before is None:
+                new.append(a)
+            elif before != (a.event_count, a.severity, a.description):
+                updated.append(a)
+
         self.conn.executemany(
-            "INSERT OR IGNORE INTO alerts (dedup_key, rule_id, title, severity, timestamp, src_ip,"
+            "INSERT INTO alerts (dedup_key, rule_id, title, severity, timestamp, src_ip,"
             " username, description, mitre, event_count, evidence, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            rows,
+            [(a.dedup_key, a.rule_id, a.title, a.severity, a.timestamp.isoformat(), a.src_ip,
+              a.username, a.description, a.mitre, a.event_count, json.dumps(a.evidence), now)
+             for a in new],
+        )
+        self.conn.executemany(
+            "UPDATE alerts SET severity=?, description=?, event_count=?, evidence=? WHERE dedup_key=?",
+            [(a.severity, a.description, a.event_count, json.dumps(a.evidence), a.dedup_key)
+             for a in updated],
         )
         self.conn.commit()
-        return self.conn.total_changes - before
+        return new, updated
+
+    def insert_alerts(self, alerts: Iterable[Alert]) -> int:
+        """Older name kept for compatibility: saves (and updates) alerts, returns #new."""
+        return len(self.upsert_alerts(alerts)[0])
+
+    def newest_event_time(self) -> Optional[datetime]:
+        row = self.conn.execute("SELECT MAX(timestamp) FROM events").fetchone()
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
 
     def fetch_alerts(self) -> list[dict]:
         out = []

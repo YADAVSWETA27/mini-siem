@@ -4,12 +4,15 @@ from __future__ import annotations
 import hashlib
 import os
 from collections import Counter
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Iterable, Optional
 
+from .models import Alert
 from .parsers import PARSERS
 from .rules import run_detection
 from .storage import Storage
+from .tail import NewLine
 
 
 @dataclass
@@ -44,6 +47,30 @@ def ingest_file(store: Storage, path: str, source: str, year: Optional[int] = No
     return IngestResult(parsed=len(events), skipped=skipped, new=store.insert_events(events))
 
 
+def ingest_lines(store: Storage, lines: Iterable[NewLine], source: str, path: str,
+                 year: Optional[int] = None) -> IngestResult:
+    """Parse lines handed over by a ``FileTailer`` and store the events (live mode).
+
+    Each event's id is built from the file, the line's *position* in it and the line text.
+    So the same line seen twice (for example after the watcher restarts and re-reads the
+    file) is stored once, while two genuinely identical lines at different positions are
+    both kept.
+    """
+    if source not in PARSERS:
+        raise ValueError(f"unknown source '{source}' (choose from {', '.join(PARSERS)})")
+    parser = PARSERS[source]
+    where = os.path.abspath(path)
+    events, skipped = [], 0
+    for nl in lines:
+        ev = parser(nl.text, year=year) if source == "auth" else parser(nl.text)
+        if ev is None:
+            skipped += 1
+            continue
+        ev.uid = hashlib.sha1(f"{source}|{where}|{nl.offset}|{nl.text}".encode()).hexdigest()
+        events.append(ev)
+    return IngestResult(parsed=len(events), skipped=skipped, new=store.insert_events(events))
+
+
 def load_blocklist(path: Optional[str]) -> list[str]:
     if not path or not os.path.exists(path):
         return []
@@ -52,6 +79,34 @@ def load_blocklist(path: Optional[str]) -> list[str]:
 
 
 def detect(store: Storage, cfg: Optional[dict] = None) -> tuple[int, int]:
-    """Run all rules over stored events. Returns (alerts found, alerts that were new)."""
+    """Run all rules over ALL stored events. Returns (alerts found, alerts that were new).
+
+    Alerts that already exist but have grown (more events) are updated in place."""
     alerts = run_detection(store.fetch_events(), cfg)
-    return len(alerts), store.insert_alerts(alerts)
+    new, _updated = store.upsert_alerts(alerts)
+    return len(alerts), len(new)
+
+
+@dataclass
+class DetectResult:
+    found: int                                   # alerts the rules produced on this pass
+    new: list[Alert] = field(default_factory=list)      # alerts we had never stored before
+    updated: list[Alert] = field(default_factory=list)  # existing alerts that grew or changed
+
+
+def detect_recent(store: Storage, cfg: Optional[dict] = None, lookback_s: int = 24 * 3600) -> DetectResult:
+    """Live-mode detection: run the rules over only the most recent events.
+
+    "Recent" is measured back from the *newest event in the database*, not from the clock,
+    so it also works when you replay an old log file. Re-checking a window instead of
+    everything keeps each pass fast as the database grows.
+
+    Limit: an attack that lasts longer than ``lookback_s`` can lose its beginning from the
+    window, so keep the lookback comfortably larger than the longest attack you care about.
+    """
+    newest = store.newest_event_time()
+    if newest is None:
+        return DetectResult(found=0)
+    alerts = run_detection(store.fetch_events(since=newest - timedelta(seconds=lookback_s)), cfg)
+    new, updated = store.upsert_alerts(alerts)
+    return DetectResult(found=len(alerts), new=new, updated=updated)
