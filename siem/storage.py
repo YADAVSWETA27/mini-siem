@@ -51,8 +51,11 @@ class Storage:
     def __init__(self, path: str = "siem.db"):
         self.path = str(path)
         # Streamlit runs scripts on worker threads, hence check_same_thread=False.
-        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        # timeout: wait up to 15 s if another program (e.g. the live watcher) is writing.
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=15)
         self.conn.row_factory = sqlite3.Row
+        # WAL mode lets the dashboard read while the live watcher writes, without "database is locked".
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
 
     # ---------------------------------------------------------------- events
